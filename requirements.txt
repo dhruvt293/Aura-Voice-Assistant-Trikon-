@@ -1,0 +1,8 @@
+faster-whisper
+ollama
+piper-tts
+pyaudio
+customtkinter
+torch
+numpy
+soundfile
