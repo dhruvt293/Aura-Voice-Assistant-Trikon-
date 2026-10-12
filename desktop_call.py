@@ -10,7 +10,7 @@ from llm import LanguageModel
 from tts import TextToSpeech
 
 class ContinuousVoiceCall:
-    def __init__(self, sample_rate=16000, silence_limit_sec=0.75):
+    def __init__(self, sample_rate=16000, silence_limit_sec=0.65):
         self.sample_rate = sample_rate
         self.silence_limit_sec = silence_limit_sec
         self.chunk_size = 512
@@ -37,6 +37,7 @@ class ContinuousVoiceCall:
         """
         Continuously listens to microphone.
         Detects speech onset and automatically stops when user pauses (silence threshold).
+        Only saves active speech to keep STT latency under 400ms.
         """
         stream = self.p.open(
             format=pyaudio.paInt16,
@@ -48,6 +49,7 @@ class ContinuousVoiceCall:
         
         print("\n[🎙️ Live Call Active] Listening... (speak in English or Hindi)")
         frames = []
+        pre_buffer = []
         speech_started = False
         silence_start = None
         
@@ -57,8 +59,6 @@ class ContinuousVoiceCall:
             except IOError:
                 continue
                 
-            frames.append(data)
-            
             # Convert audio chunk to torch tensor for VAD
             audio_int16 = np.frombuffer(data, np.int16)
             audio_float32 = audio_int16.astype(np.float32) / 32768.0
@@ -70,14 +70,21 @@ class ContinuousVoiceCall:
                 if not speech_started:
                     speech_started = True
                     print("  -> Speech detected...")
+                    frames = list(pre_buffer) # Prepend onset audio
+                frames.append(data)
                 silence_start = None
             elif speech_started:
+                frames.append(data)
                 if silence_start is None:
                     silence_start = time.time()
                 elif time.time() - silence_start > self.silence_limit_sec:
                     # User finished speaking!
                     print("  -> Turn complete. Processing response...")
                     break
+            else:
+                pre_buffer.append(data)
+                if len(pre_buffer) > 8: # keep last ~250ms
+                    pre_buffer.pop(0)
                     
         stream.stop_stream()
         stream.close()

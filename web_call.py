@@ -642,6 +642,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             if (!isCallActive) return;
 
             audioChunks = [];
+            let rollingPreBuffer = [];
             isRecordingSpeech = false;
             silenceStartTime = 0;
             speechStartTime = 0;
@@ -650,7 +651,15 @@ HTML_CONTENT = """<!DOCTYPE html>
             mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType });
 
             mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) audioChunks.push(e.data);
+                if (e.data.size > 0) {
+                    if (isRecordingSpeech) {
+                        audioChunks.push(e.data);
+                    } else {
+                        // Keep a short 300ms rolling pre-buffer so the very first sound isn't cut off
+                        rollingPreBuffer.push(e.data);
+                        if (rollingPreBuffer.length > 3) rollingPreBuffer.shift();
+                    }
+                }
             };
 
             mediaRecorder.onstop = async () => {
@@ -684,21 +693,23 @@ HTML_CONTENT = """<!DOCTYPE html>
                     if (!isRecordingSpeech) {
                         isRecordingSpeech = true;
                         speechStartTime = now;
+                        audioChunks = [...rollingPreBuffer]; // Prepend speech onset
                     }
                     silenceStartTime = 0; // Reset silence counter
                 } else if (isRecordingSpeech) {
                     if (silenceStartTime === 0) {
                         silenceStartTime = now;
-                    } else if (now - silenceStartTime > SILENCE_DURATION_MS) {
+                    } else if (now - silenceStartTime > 650) { // 650ms natural pause
                         // User has stopped speaking!
-                        if (now - speechStartTime > MIN_SPEECH_DURATION_MS) {
+                        if (now - speechStartTime > 450) {
                             clearInterval(checkAudioInterval);
-                            setOrbState('thinking', 'Thinking...', 'Processing your message...');
+                            setOrbState('thinking', 'Thinking...', 'Aura is formulating an answer...');
                             mediaRecorder.stop();
                         } else {
                             // Ignored noise spike
                             isRecordingSpeech = false;
                             silenceStartTime = 0;
+                            audioChunks = [];
                         }
                     }
                 }

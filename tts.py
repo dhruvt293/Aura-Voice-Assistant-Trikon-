@@ -34,17 +34,17 @@ class TextToSpeech:
             
     def speak(self, text, language="en", output_file="output.wav"):
         """
-        Synthesizes text to speech and saves it to a WAV file.
+        Synthesizes text to speech with a constant, fluent female voice.
         Returns (output_file, latency_seconds).
         """
         import time
         t_start = time.time()
         
-        # Route between Hindi and English voice models
-        voice = self.hi_voice if (language == "hi" or language == "hindi") else self.en_voice
+        # Always use the natural, fluent English female voice (Lessac)
+        voice = self.en_voice
         
-        # Clean text for smoother synthesis
-        clean_text = text.replace("*", "").replace("#", "").replace('"', '').strip()
+        # Clean text for smoother synthesis (remove quotes, asterisks, brackets)
+        clean_text = text.replace("*", "").replace("#", "").replace('"', '').replace("'", "").strip()
         if not clean_text:
             clean_text = "I am listening."
         

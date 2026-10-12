@@ -24,22 +24,42 @@ class LanguageModel:
         
     def chat(self, user_text, language="en"):
         """
-        Sends user text to the LLM and returns (response_text, latency_seconds).
+        Sends user text to the LLM and strictly responds in the user's language.
+        Returns (response_text, latency_seconds).
         """
         import time
-        self.messages.append({"role": "user", "content": user_text})
         
-        # Keep conversation history bounded to last 6 turns for low context overhead & speed
-        if len(self.messages) > 7:
-            self.messages = [self.system_prompt] + self.messages[-6:]
+        # Detect if text contains Hindi characters or language was detected as Hindi
+        has_devanagari = any('\u0900' <= char <= '\u097F' for char in user_text)
+        is_hindi = (language in ["hi", "hindi"]) or has_devanagari
+        
+        if is_hindi:
+            system_instruction = (
+                "You are Aura, an AI voice assistant on a live phone call. "
+                "The user is speaking in Hindi. You MUST respond strictly in conversational Hindi. "
+                "Write your Hindi reply in Roman/Latin script (Hinglish) so it can be spoken out loud fluently. "
+                "Example: 'Namaste! Main bilkul theek hoon, aap batayein?' "
+                "Keep your answer to exactly 1 short spoken sentence. Never use markdown, bullet points, or English."
+            )
+        else:
+            system_instruction = (
+                "You are Aura, a friendly female AI voice assistant on a live phone call. "
+                "The user is speaking in English. You MUST respond in fluent English. "
+                "Keep your answer to exactly 1 concise, natural spoken sentence. "
+                "Never use markdown, bullet points, asterisks, or lists."
+            )
+            
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": user_text}
+        ]
             
         t_start = time.time()
         try:
-            # Generate short, crisp conversational response with low max_new_tokens for low latency
             result = self.generator(
-                self.messages, 
-                max_new_tokens=45, 
-                temperature=0.6,
+                messages, 
+                max_new_tokens=32, 
+                temperature=0.4,
                 do_sample=True,
                 pad_token_id=self.generator.tokenizer.eos_token_id
             )
@@ -47,15 +67,16 @@ class LanguageModel:
             reply = generated_messages[-1]["content"].strip()
             
             # Clean any stray formatting
-            reply = reply.replace("*", "").replace("#", "").strip()
+            reply = reply.replace("*", "").replace("#", "").replace('"', '').strip()
             
-            self.messages.append({"role": "assistant", "content": reply})
             latency = round(time.time() - t_start, 3)
             return reply, latency
         except Exception as e:
             print(f"Error generating text: {e}")
             latency = round(time.time() - t_start, 3)
-            return "I'm having a little trouble thinking right now. Could you repeat that?", latency
+            if is_hindi:
+                return "Namaste! Main sun rahi hoon, kripya dobara bolein.", latency
+            return "I am listening. Could you please repeat that?", latency
     
     def reset_context(self):
         """

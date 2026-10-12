@@ -28,7 +28,10 @@ class SpeechToText:
             audio_file, 
             beam_size=1, 
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
+            vad_parameters=dict(min_silence_duration_ms=400),
+            without_timestamps=True,
+            condition_on_previous_text=False,
+            temperature=0.0
         )
         
         text = " ".join([segment.text for segment in segments]).strip()
