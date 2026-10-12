@@ -627,10 +627,28 @@ HTML_CONTENT = """<!DOCTYPE html>
             callBtnText.innerText = 'Start Live Call';
             callBtnIcon.innerText = '📞';
             statusDot.classList.remove('active');
-            statusText.innerText = 'Standby';
-
             setOrbState('idle', 'Call Ended', 'Click Start Live Call to reconnect.');
         }
+
+        // Optional shortcut: Tap the orb or press Space to instantly submit turn without waiting for silence!
+        orb.onclick = () => {
+            if (isCallActive && isRecordingSpeech && mediaRecorder && mediaRecorder.state === 'recording') {
+                clearInterval(checkAudioInterval);
+                orb.style.transform = 'scale(1)';
+                setOrbState('thinking', 'Thinking...', 'Aura is processing your answer...');
+                mediaRecorder.stop();
+            }
+        };
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && isCallActive && isRecordingSpeech && mediaRecorder && mediaRecorder.state === 'recording') {
+                e.preventDefault();
+                clearInterval(checkAudioInterval);
+                orb.style.transform = 'scale(1)';
+                setOrbState('thinking', 'Thinking...', 'Aura is processing your answer...');
+                mediaRecorder.stop();
+            }
+        });
 
         function setOrbState(state, heading, sub) {
             orb.className = 'orb ' + state;
@@ -638,8 +656,17 @@ HTML_CONTENT = """<!DOCTYPE html>
             mainSub.innerText = sub;
         }
 
-        function startListeningLoop() {
+        async function startListeningLoop() {
             if (!isCallActive) return;
+
+            // Ensure AudioContext is actively running (browsers suspend it after audio playback!)
+            try {
+                if (audioContext && audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+            } catch (e) {
+                console.warn('AudioContext resume error:', e);
+            }
 
             audioChunks = [];
             let rollingPreBuffer = [];
@@ -648,14 +675,21 @@ HTML_CONTENT = """<!DOCTYPE html>
             speechStartTime = 0;
 
             const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/wav';
-            mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType });
+            try {
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                }
+                mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType });
+            } catch (e) {
+                console.error('MediaRecorder re-init error:', e);
+            }
 
             mediaRecorder.ondataavailable = (e) => {
                 if (e.data.size > 0) {
                     if (isRecordingSpeech) {
                         audioChunks.push(e.data);
                     } else {
-                        // Keep a short 300ms rolling pre-buffer so the very first sound isn't cut off
+                        // Keep a short 300ms pre-buffer so speech onset is not clipped
                         rollingPreBuffer.push(e.data);
                         if (rollingPreBuffer.length > 3) rollingPreBuffer.shift();
                     }
@@ -666,11 +700,13 @@ HTML_CONTENT = """<!DOCTYPE html>
                 if (audioChunks.length > 0 && isCallActive) {
                     const audioBlob = new Blob(audioChunks, { type: mimeType });
                     await processUserSpeech(audioBlob);
+                } else if (isCallActive) {
+                    startListeningLoop();
                 }
             };
 
             mediaRecorder.start(100);
-            setOrbState('listening', 'Listening...', 'I am listening. Speak anytime.');
+            setOrbState('listening', 'Listening...', 'Aura is listening. Speak your question anytime.');
 
             // Real-time Voice Activity Detection (VAD) via RMS Volume
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
@@ -687,33 +723,42 @@ HTML_CONTENT = """<!DOCTYPE html>
                 }
                 let rms = Math.sqrt(sumSquares / dataArray.length);
 
-                const now = Date.now();
+                // Visual live feedback: pulsing orb with voice volume!
+                if (orb.classList.contains('listening')) {
+                    const scale = 1.0 + Math.min(rms * 5.0, 0.45);
+                    orb.style.transform = `scale(${scale.toFixed(3)})`;
+                }
 
-                if (rms > VAD_VOLUME_THRESHOLD) {
+                const now = Date.now();
+                const SENSITIVITY = 0.016; // Adaptive microphone sensitivity
+
+                if (rms > SENSITIVITY) {
                     if (!isRecordingSpeech) {
                         isRecordingSpeech = true;
                         speechStartTime = now;
-                        audioChunks = [...rollingPreBuffer]; // Prepend speech onset
+                        audioChunks = [...rollingPreBuffer]; // Prepend onset
+                        setOrbState('listening', 'Hearing You...', 'Keep speaking naturally...');
                     }
-                    silenceStartTime = 0; // Reset silence counter
+                    silenceStartTime = 0; // Reset silence counter while user speaks
                 } else if (isRecordingSpeech) {
                     if (silenceStartTime === 0) {
                         silenceStartTime = now;
-                    } else if (now - silenceStartTime > 650) { // 650ms natural pause
-                        // User has stopped speaking!
-                        if (now - speechStartTime > 450) {
+                    } else if (now - silenceStartTime > 650 || (now - speechStartTime > 7500)) { 
+                        // User has stopped speaking (or max 7.5s speech reached)!
+                        if (now - speechStartTime > 400) {
                             clearInterval(checkAudioInterval);
-                            setOrbState('thinking', 'Thinking...', 'Aura is formulating an answer...');
-                            mediaRecorder.stop();
+                            orb.style.transform = 'scale(1)';
+                            setOrbState('thinking', 'Thinking...', 'Aura is processing your answer...');
+                            if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
                         } else {
-                            // Ignored noise spike
+                            // Ignored short noise click
                             isRecordingSpeech = false;
                             silenceStartTime = 0;
                             audioChunks = [];
                         }
                     }
                 }
-            }, 50);
+            }, 40);
         }
 
         async function processUserSpeech(audioBlob) {
@@ -743,7 +788,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     appendMessage('assistant', data.ai_reply, data.language, data.metrics.total);
 
                     // Play Assistant Voice Response
-                    playAssistantVoice(data.audio_url);
+                    await playAssistantVoice(data.audio_url);
                 } else {
                     // Empty speech / unrecognized
                     startListeningLoop();
@@ -755,20 +800,34 @@ HTML_CONTENT = """<!DOCTYPE html>
             }
         }
 
-        function playAssistantVoice(audioUrl) {
+        async function playAssistantVoice(audioUrl) {
             if (!isCallActive) return;
 
-            setOrbState('speaking', 'Speaking...', 'Aura is speaking back.');
-            if (currentAudioPlayer) currentAudioPlayer.pause();
+            setOrbState('speaking', 'Speaking...', 'Aura is answering out loud.');
+            if (currentAudioPlayer) {
+                currentAudioPlayer.pause();
+                currentAudioPlayer = null;
+            }
 
             currentAudioPlayer = new Audio(audioUrl + '?t=' + Date.now());
-            currentAudioPlayer.play();
+            
+            try {
+                await currentAudioPlayer.play();
+            } catch (e) {
+                console.warn('Playback error:', e);
+                startListeningLoop();
+                return;
+            }
 
-            // Interruption & completion handling
-            currentAudioPlayer.onended = () => {
+            // Continuous transition: when voice ends, resume listening!
+            currentAudioPlayer.onended = async () => {
                 if (isCallActive) {
-                    // Seamless automatic transition back to listening for the next conversational turn!
-                    startListeningLoop();
+                    if (audioContext && audioContext.state === 'suspended') {
+                        await audioContext.resume();
+                    }
+                    setTimeout(() => {
+                        if (isCallActive) startListeningLoop();
+                    }, 150);
                 }
             };
 
