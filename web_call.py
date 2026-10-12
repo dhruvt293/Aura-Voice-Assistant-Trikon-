@@ -513,6 +513,9 @@ HTML_CONTENT = """<!DOCTYPE html>
                     <span id="callBtnIcon">📞</span>
                     <span id="callBtnText">Start Live Call</span>
                 </button>
+                <button class="btn-secondary" id="doneBtn" style="display: none; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.5); font-weight: 600;" onclick="triggerTurnSubmission()">
+                    <span>Done Speaking ➔</span>
+                </button>
             </div>
         </div>
 
@@ -712,6 +715,12 @@ HTML_CONTENT = """<!DOCTYPE html>
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
             if (checkAudioInterval) clearInterval(checkAudioInterval);
 
+            // Calibrated thresholds for real-world laptop microphones
+            const SPEECH_THRESHOLD = 0.032;   // True voice onset
+            const SILENCE_THRESHOLD = 0.024;  // Pause threshold
+            const SILENCE_LIMIT_MS = 550;     // 550ms pause triggers automatic answer
+            const MAX_SPEECH_LIMIT_MS = 5000; // 5-second hard limit so it can NEVER freeze
+
             checkAudioInterval = setInterval(() => {
                 if (!isCallActive || orb.classList.contains('speaking') || orb.classList.contains('thinking')) return;
 
@@ -725,40 +734,60 @@ HTML_CONTENT = """<!DOCTYPE html>
 
                 // Visual live feedback: pulsing orb with voice volume!
                 if (orb.classList.contains('listening')) {
-                    const scale = 1.0 + Math.min(rms * 5.0, 0.45);
+                    const scale = 1.0 + Math.min(rms * 4.5, 0.40);
                     orb.style.transform = `scale(${scale.toFixed(3)})`;
                 }
 
                 const now = Date.now();
-                const SENSITIVITY = 0.016; // Adaptive microphone sensitivity
 
-                if (rms > SENSITIVITY) {
+                // 1. HARD SAFETY CUTOFF: If user has been speaking for >5s, submit immediately!
+                if (isRecordingSpeech && (now - speechStartTime > MAX_SPEECH_LIMIT_MS)) {
+                    triggerTurnSubmission();
+                    return;
+                }
+
+                // 2. SPEECH ONSET DETECTION
+                if (rms >= SPEECH_THRESHOLD) {
                     if (!isRecordingSpeech) {
                         isRecordingSpeech = true;
                         speechStartTime = now;
-                        audioChunks = [...rollingPreBuffer]; // Prepend onset
-                        setOrbState('listening', 'Hearing You...', 'Keep speaking naturally...');
+                        audioChunks = [...rollingPreBuffer]; // Prepend speech onset
+                        setOrbState('listening', 'Hearing You...', 'Listening to your question...');
+                        document.getElementById('doneBtn').style.display = 'inline-flex';
                     }
-                    silenceStartTime = 0; // Reset silence counter while user speaks
-                } else if (isRecordingSpeech) {
+                    silenceStartTime = 0; // User is actively speaking
+                } 
+                // 3. SILENCE & COMPLETION DETECTION
+                else if (isRecordingSpeech && rms < SILENCE_THRESHOLD) {
                     if (silenceStartTime === 0) {
                         silenceStartTime = now;
-                    } else if (now - silenceStartTime > 650 || (now - speechStartTime > 7500)) { 
-                        // User has stopped speaking (or max 7.5s speech reached)!
-                        if (now - speechStartTime > 400) {
-                            clearInterval(checkAudioInterval);
-                            orb.style.transform = 'scale(1)';
-                            setOrbState('thinking', 'Thinking...', 'Aura is processing your answer...');
-                            if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+                    } else if (now - silenceStartTime > SILENCE_LIMIT_MS) {
+                        // User paused for 550ms - question complete!
+                        if (now - speechStartTime > 350) {
+                            triggerTurnSubmission();
                         } else {
-                            // Ignored short noise click
+                            // Discard short tap/click
                             isRecordingSpeech = false;
                             silenceStartTime = 0;
                             audioChunks = [];
+                            document.getElementById('doneBtn').style.display = 'none';
+                            setOrbState('listening', 'Listening...', 'Aura is listening. Speak anytime.');
                         }
                     }
                 }
-            }, 40);
+            }, 35);
+        }
+
+        function triggerTurnSubmission() {
+            if (!isCallActive || !isRecordingSpeech) return;
+            if (checkAudioInterval) clearInterval(checkAudioInterval);
+            isRecordingSpeech = false;
+            document.getElementById('doneBtn').style.display = 'none';
+            orb.style.transform = 'scale(1)';
+            setOrbState('thinking', 'Thinking...', 'Aura is formulating an answer...');
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
         }
 
         async function processUserSpeech(audioBlob) {
