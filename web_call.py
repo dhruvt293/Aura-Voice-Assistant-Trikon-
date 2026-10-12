@@ -467,12 +467,24 @@ HTML_CONTENT = """<!DOCTYPE html>
             flex-direction: column;
             align-items: center;
             gap: 2px;
-        }
-
-        .metric-val {
-            color: var(--text-primary);
+        .lang-toggle-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 12px;
             font-weight: 600;
-            font-size: 13px;
+            padding: 5px 12px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .lang-toggle-btn:hover {
+            color: var(--text-primary);
+        }
+        .lang-toggle-btn.active {
+            background: rgba(56, 189, 248, 0.25);
+            color: var(--accent-cyan);
+            border: 1px solid rgba(56, 189, 248, 0.4);
         }
     </style>
 </head>
@@ -491,8 +503,10 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <span class="pill-dot" id="callStatusDot"></span>
                 <span id="callStatusText">Standby</span>
             </div>
-            <div class="pill">
-                <span>🌐 Bilingual (EN + HI)</span>
+            <div class="pill" style="padding: 4px 6px; gap: 4px;">
+                <button class="lang-toggle-btn active" id="btnAuto" onclick="setLanguage('auto')">🌐 Auto</button>
+                <button class="lang-toggle-btn" id="btnEn" onclick="setLanguage('en')">🇬🇧 English</button>
+                <button class="lang-toggle-btn" id="btnHi" onclick="setLanguage('hi')">🇮🇳 Hindi</button>
             </div>
         </div>
     </header>
@@ -563,15 +577,12 @@ HTML_CONTENT = """<!DOCTYPE html>
         let analyser = null;
         let mediaRecorder = null;
         let audioChunks = [];
-        let isRecordingSpeech = false;
-        let speechStartTime = 0;
-        let silenceStartTime = 0;
+        let isUserSpeaking = false;
+        let silenceTimer = null;
+        let speechStartTimestamp = 0;
         let checkAudioInterval = null;
         let currentAudioPlayer = null;
-
-        const VAD_VOLUME_THRESHOLD = 0.025; // Minimum RMS volume for speech
-        const SILENCE_DURATION_MS = 750;     // 750ms silence triggers auto-submission
-        const MIN_SPEECH_DURATION_MS = 600;  // Ignore short clicks or coughs < 600ms
+        let currentLanguageMode = 'auto';
 
         const orb = document.getElementById('voiceOrb');
         const mainHeading = document.getElementById('mainStatusHeading');
@@ -581,7 +592,16 @@ HTML_CONTENT = """<!DOCTYPE html>
         const callBtnIcon = document.getElementById('callBtnIcon');
         const statusDot = document.getElementById('callStatusDot');
         const statusText = document.getElementById('callStatusText');
+        const doneBtn = document.getElementById('doneBtn');
         const messagesContainer = document.getElementById('messagesContainer');
+
+        function setLanguage(lang) {
+            currentLanguageMode = lang;
+            document.querySelectorAll('.lang-toggle-btn').forEach(b => b.classList.remove('active'));
+            if (lang === 'auto') document.getElementById('btnAuto').classList.add('active');
+            if (lang === 'en') document.getElementById('btnEn').classList.add('active');
+            if (lang === 'hi') document.getElementById('btnHi').classList.add('active');
+        }
 
         async function toggleCall() {
             if (!isCallActive) {
@@ -612,13 +632,14 @@ HTML_CONTENT = """<!DOCTYPE html>
                 startListeningLoop();
 
             } catch (err) {
-                alert('Microphone access denied or audio device not found: ' + err.message);
+                alert('Microphone access denied: ' + err.message);
                 console.error(err);
             }
         }
 
         function stopLiveCall() {
             isCallActive = false;
+            if (silenceTimer) clearTimeout(silenceTimer);
             if (checkAudioInterval) clearInterval(checkAudioInterval);
             if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
             if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
@@ -630,28 +651,11 @@ HTML_CONTENT = """<!DOCTYPE html>
             callBtnText.innerText = 'Start Live Call';
             callBtnIcon.innerText = '📞';
             statusDot.classList.remove('active');
+            statusText.innerText = 'Standby';
+            if (doneBtn) doneBtn.style.display = 'none';
+
             setOrbState('idle', 'Call Ended', 'Click Start Live Call to reconnect.');
         }
-
-        // Optional shortcut: Tap the orb or press Space to instantly submit turn without waiting for silence!
-        orb.onclick = () => {
-            if (isCallActive && isRecordingSpeech && mediaRecorder && mediaRecorder.state === 'recording') {
-                clearInterval(checkAudioInterval);
-                orb.style.transform = 'scale(1)';
-                setOrbState('thinking', 'Thinking...', 'Aura is processing your answer...');
-                mediaRecorder.stop();
-            }
-        };
-
-        window.addEventListener('keydown', (e) => {
-            if (e.code === 'Space' && isCallActive && isRecordingSpeech && mediaRecorder && mediaRecorder.state === 'recording') {
-                e.preventDefault();
-                clearInterval(checkAudioInterval);
-                orb.style.transform = 'scale(1)';
-                setOrbState('thinking', 'Thinking...', 'Aura is processing your answer...');
-                mediaRecorder.stop();
-            }
-        });
 
         function setOrbState(state, heading, sub) {
             orb.className = 'orb ' + state;
@@ -662,7 +666,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         async function startListeningLoop() {
             if (!isCallActive) return;
 
-            // Ensure AudioContext is actively running (browsers suspend it after audio playback!)
+            // Ensure AudioContext is actively running
             try {
                 if (audioContext && audioContext.state === 'suspended') {
                     await audioContext.resume();
@@ -672,10 +676,10 @@ HTML_CONTENT = """<!DOCTYPE html>
             }
 
             audioChunks = [];
-            let rollingPreBuffer = [];
-            isRecordingSpeech = false;
-            silenceStartTime = 0;
-            speechStartTime = 0;
+            isUserSpeaking = false;
+            if (silenceTimer) clearTimeout(silenceTimer);
+            silenceTimer = null;
+            speechStartTimestamp = 0;
 
             const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/wav';
             try {
@@ -684,18 +688,12 @@ HTML_CONTENT = """<!DOCTYPE html>
                 }
                 mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType });
             } catch (e) {
-                console.error('MediaRecorder re-init error:', e);
+                console.error('MediaRecorder error:', e);
             }
 
             mediaRecorder.ondataavailable = (e) => {
                 if (e.data.size > 0) {
-                    if (isRecordingSpeech) {
-                        audioChunks.push(e.data);
-                    } else {
-                        // Keep a short 300ms pre-buffer so speech onset is not clipped
-                        rollingPreBuffer.push(e.data);
-                        if (rollingPreBuffer.length > 3) rollingPreBuffer.shift();
-                    }
+                    audioChunks.push(e.data);
                 }
             };
 
@@ -710,16 +708,13 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             mediaRecorder.start(100);
             setOrbState('listening', 'Listening...', 'Aura is listening. Speak your question anytime.');
+            if (doneBtn) doneBtn.style.display = 'none';
 
-            // Real-time Voice Activity Detection (VAD) via RMS Volume
+            // Real-time Voice Activity Detection (VAD)
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
             if (checkAudioInterval) clearInterval(checkAudioInterval);
 
-            // Calibrated thresholds for real-world laptop microphones
-            const SPEECH_THRESHOLD = 0.032;   // True voice onset
-            const SILENCE_THRESHOLD = 0.024;  // Pause threshold
-            const SILENCE_LIMIT_MS = 550;     // 550ms pause triggers automatic answer
-            const MAX_SPEECH_LIMIT_MS = 5000; // 5-second hard limit so it can NEVER freeze
+            let baselineNoise = 0.015;
 
             checkAudioInterval = setInterval(() => {
                 if (!isCallActive || orb.classList.contains('speaking') || orb.classList.contains('thinking')) return;
@@ -732,68 +727,83 @@ HTML_CONTENT = """<!DOCTYPE html>
                 }
                 let rms = Math.sqrt(sumSquares / dataArray.length);
 
-                // Visual live feedback: pulsing orb with voice volume!
+                // Pulse the orb with real-time volume
                 if (orb.classList.contains('listening')) {
-                    const scale = 1.0 + Math.min(rms * 4.5, 0.40);
+                    const scale = 1.0 + Math.min(rms * 4.0, 0.45);
                     orb.style.transform = `scale(${scale.toFixed(3)})`;
                 }
 
                 const now = Date.now();
 
-                // 1. HARD SAFETY CUTOFF: If user has been speaking for >5s, submit immediately!
-                if (isRecordingSpeech && (now - speechStartTime > MAX_SPEECH_LIMIT_MS)) {
-                    triggerTurnSubmission();
-                    return;
+                // If user is not yet speaking, update the background noise floor
+                if (!isUserSpeaking) {
+                    baselineNoise = baselineNoise * 0.95 + rms * 0.05;
                 }
 
-                // 2. SPEECH ONSET DETECTION
-                if (rms >= SPEECH_THRESHOLD) {
-                    if (!isRecordingSpeech) {
-                        isRecordingSpeech = true;
-                        speechStartTime = now;
-                        audioChunks = [...rollingPreBuffer]; // Prepend speech onset
+                const voiceThreshold = Math.max(baselineNoise * 1.8 + 0.015, 0.028);
+
+                // Detect when user speaks
+                if (rms > voiceThreshold) {
+                    if (!isUserSpeaking) {
+                        isUserSpeaking = true;
+                        speechStartTimestamp = now;
                         setOrbState('listening', 'Hearing You...', 'Listening to your question...');
-                        document.getElementById('doneBtn').style.display = 'inline-flex';
+                        if (doneBtn) doneBtn.style.display = 'inline-flex';
                     }
-                    silenceStartTime = 0; // User is actively speaking
-                } 
-                // 3. SILENCE & COMPLETION DETECTION
-                else if (isRecordingSpeech && rms < SILENCE_THRESHOLD) {
-                    if (silenceStartTime === 0) {
-                        silenceStartTime = now;
-                    } else if (now - silenceStartTime > SILENCE_LIMIT_MS) {
-                        // User paused for 550ms - question complete!
-                        if (now - speechStartTime > 350) {
+                    // Reset silence timer while voice is active
+                    if (silenceTimer) {
+                        clearTimeout(silenceTimer);
+                        silenceTimer = null;
+                    }
+                } else if (isUserSpeaking) {
+                    // Start silence timer once user stops talking
+                    if (!silenceTimer) {
+                        silenceTimer = setTimeout(() => {
+                            // User paused for 500ms after speaking - finish turn!
                             triggerTurnSubmission();
-                        } else {
-                            // Discard short tap/click
-                            isRecordingSpeech = false;
-                            silenceStartTime = 0;
-                            audioChunks = [];
-                            document.getElementById('doneBtn').style.display = 'none';
-                            setOrbState('listening', 'Listening...', 'Aura is listening. Speak anytime.');
-                        }
+                        }, 500);
                     }
+                }
+
+                // Hard safety limit: max 6 seconds per utterance so it NEVER freezes
+                if (isUserSpeaking && (now - speechStartTimestamp > 6000)) {
+                    triggerTurnSubmission();
                 }
             }, 35);
         }
 
         function triggerTurnSubmission() {
-            if (!isCallActive || !isRecordingSpeech) return;
+            if (!isCallActive || !isUserSpeaking) return;
+            isUserSpeaking = false;
+            if (silenceTimer) clearTimeout(silenceTimer);
             if (checkAudioInterval) clearInterval(checkAudioInterval);
-            isRecordingSpeech = false;
-            document.getElementById('doneBtn').style.display = 'none';
+            if (doneBtn) doneBtn.style.display = 'none';
             orb.style.transform = 'scale(1)';
-            setOrbState('thinking', 'Thinking...', 'Aura is formulating an answer...');
+            setOrbState('thinking', 'Thinking...', 'Aura is generating your answer...');
             if (mediaRecorder && mediaRecorder.state === 'recording') {
                 mediaRecorder.stop();
             }
         }
 
+        // Tap the orb or press Spacebar to force turn submission instantly
+        orb.onclick = () => {
+            if (isCallActive && isUserSpeaking) {
+                triggerTurnSubmission();
+            }
+        };
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' && isCallActive && isUserSpeaking) {
+                e.preventDefault();
+                triggerTurnSubmission();
+            }
+        });
+
         async function processUserSpeech(audioBlob) {
             try {
                 const formData = new FormData();
                 formData.append('audio_file', audioBlob, 'recording.webm');
+                formData.append('language_hint', currentLanguageMode);
 
                 const response = await fetch('/api/interact', {
                     method: 'POST',
@@ -903,7 +913,10 @@ async def serve_home():
     return HTMLResponse(content=HTML_CONTENT)
 
 @app.post("/api/interact")
-async def interact(audio_file: UploadFile = File(...)):
+async def interact(
+    audio_file: UploadFile = File(...),
+    language_hint: str = Form("auto")
+):
     """
     Continuous Live Call Endpoint:
     Processes user audio chunk through Faster-Whisper STT -> Qwen LLM -> Piper TTS.
@@ -918,8 +931,8 @@ async def interact(audio_file: UploadFile = File(...)):
         with open(temp_input, "wb") as f:
             f.write(content)
             
-        # 1. Speech-to-Text (STT)
-        user_text, detected_lang, stt_latency = stt_model.transcribe(temp_input)
+        # 1. Speech-to-Text (STT) with language hint (Auto / English / Hindi)
+        user_text, detected_lang, stt_latency = stt_model.transcribe(temp_input, language_hint=language_hint)
         
         if not user_text.strip():
             return JSONResponse({"status": "no_speech"})
