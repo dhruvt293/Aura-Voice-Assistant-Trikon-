@@ -35,8 +35,18 @@ class TextToSpeech:
     def speak(self, text, language="en", output_file="output.wav"):
         """
         Synthesizes text to speech and saves it to a WAV file.
+        Returns (output_file, latency_seconds).
         """
-        voice = self.hi_voice if language == "hi" else self.en_voice
+        import time
+        t_start = time.time()
+        
+        # Route between Hindi and English voice models
+        voice = self.hi_voice if (language == "hi" or language == "hindi") else self.en_voice
+        
+        # Clean text for smoother synthesis
+        clean_text = text.replace("*", "").replace("#", "").replace('"', '').strip()
+        if not clean_text:
+            clean_text = "I am listening."
         
         # Synthesize audio to a WAV file
         with wave.open(output_file, "wb") as wav_file:
@@ -44,11 +54,11 @@ class TextToSpeech:
             wav_file.setsampwidth(2)
             wav_file.setframerate(voice.config.sample_rate)
             # Write each chunk of audio to the wave file
-            for chunk in voice.synthesize(text):
+            for chunk in voice.synthesize(clean_text):
                 wav_file.writeframes(chunk.audio_int16_bytes)
             
-        # Return the file path for Gradio to play
-        return output_file
+        latency = round(time.time() - t_start, 3)
+        return output_file, latency
         
     def play_audio(self, file_path):
         chunk = 1024

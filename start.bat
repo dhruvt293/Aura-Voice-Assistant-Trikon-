@@ -1,5 +1,5 @@
 @echo off
-echo Starting Aura Voice Assistant...
-echo Please leave this window open! The server is running here.
-python app.py
+echo Starting Aura Live Continuous Voice Assistant...
+echo Server running on http://127.0.0.1:8000
+python web_call.py
 pause

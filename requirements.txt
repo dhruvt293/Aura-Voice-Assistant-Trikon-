@@ -1,6 +1,10 @@
 faster-whisper
-ollama
 piper-tts
+transformers
+accelerate
+fastapi
+uvicorn
+python-multipart
 pyaudio
 customtkinter
 torch

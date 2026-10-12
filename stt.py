@@ -14,15 +14,25 @@ class SpeechToText:
         
     def transcribe(self, audio_file):
         """
-        Transcribes the given audio file and returns the text and detected language.
+        Transcribes the given audio file with minimal latency.
+        Returns (text, language, latency_seconds).
         """
+        import time
         if not os.path.exists(audio_file):
-            return "", "en"
+            return "", "en", 0.0
             
-        segments, info = self.model.transcribe(audio_file, beam_size=5)
+        t_start = time.time()
+        # beam_size=1 for maximum speed (greedy decoding)
+        # vad_filter=True to trim non-speech audio
+        segments, info = self.model.transcribe(
+            audio_file, 
+            beam_size=1, 
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500)
+        )
         
-        text = ""
-        for segment in segments:
-            text += segment.text + " "
-            
-        return text.strip(), info.language
+        text = " ".join([segment.text for segment in segments]).strip()
+        latency = round(time.time() - t_start, 3)
+        
+        lang = info.language if info.language else "en"
+        return text, lang, latency

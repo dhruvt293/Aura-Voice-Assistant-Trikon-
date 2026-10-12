@@ -13,29 +13,49 @@ class LanguageModel:
         
         self.system_prompt = {
             "role": "system", 
-            "content": "You are Aura, a helpful and concise voice AI assistant. Keep your answers brief (1-2 sentences), natural, and conversational, as they will be spoken out loud. Avoid using lists, markdown formatting, or overly complex sentences."
+            "content": (
+                "You are Aura, an AI voice assistant on a live phone call. "
+                "Respond naturally in 1 or 2 concise, spoken sentences. "
+                "Never use markdown formatting, bullet points, asterisks, or lists. "
+                "Always reply in the exact same language the user spoke (Hindi or English)."
+            )
         }
         self.messages = [self.system_prompt]
         
-    def chat(self, user_text):
+    def chat(self, user_text, language="en"):
         """
-        Sends the user text to the LLM and returns the response, maintaining context.
+        Sends user text to the LLM and returns (response_text, latency_seconds).
         """
+        import time
         self.messages.append({"role": "user", "content": user_text})
         
+        # Keep conversation history bounded to last 6 turns for low context overhead & speed
+        if len(self.messages) > 7:
+            self.messages = [self.system_prompt] + self.messages[-6:]
+            
+        t_start = time.time()
         try:
-            # Generate response
-            result = self.generator(self.messages, max_new_tokens=60, temperature=0.7)
-            # Pipeline returns the full conversation when passing messages
+            # Generate short, crisp conversational response with low max_new_tokens for low latency
+            result = self.generator(
+                self.messages, 
+                max_new_tokens=45, 
+                temperature=0.6,
+                do_sample=True,
+                pad_token_id=self.generator.tokenizer.eos_token_id
+            )
             generated_messages = result[0]["generated_text"]
-            # The last message is the assistant's reply
-            reply = generated_messages[-1]["content"]
+            reply = generated_messages[-1]["content"].strip()
+            
+            # Clean any stray formatting
+            reply = reply.replace("*", "").replace("#", "").strip()
             
             self.messages.append({"role": "assistant", "content": reply})
-            return reply
+            latency = round(time.time() - t_start, 3)
+            return reply, latency
         except Exception as e:
             print(f"Error generating text: {e}")
-            return "I'm sorry, my language model encountered an error."
+            latency = round(time.time() - t_start, 3)
+            return "I'm having a little trouble thinking right now. Could you repeat that?", latency
     
     def reset_context(self):
         """
